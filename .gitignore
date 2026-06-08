@@ -1,0 +1,17 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Build artifacts
+build/
+*.o
+hpc/ns3d_solver
+ns3d_cpu
+
+# Simulation output
+output/
+*.bin
+*.png
+*.gif
+*.mp4

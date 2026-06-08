@@ -1,0 +1,7 @@
+# Python dependencies for the visualization / explorer tools.
+#   python -m venv venv && source venv/bin/activate
+#   pip install -r requirements.txt
+numpy>=1.24
+matplotlib>=3.7
+pyvista>=0.43      # 3D volume rendering (plot_3d_animation.py, plot_interactive.py)
+imageio>=2.31      # GIF/MP4 export for animations
