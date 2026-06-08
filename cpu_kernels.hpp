@@ -472,4 +472,45 @@ inline Real local_kinetic_energy(const Real* u, const Real* v, const Real* w, in
     return sum;
 }
 
+/* ----------------------------------------------------------------
+ *  Robustness helpers: adaptive CFL, divergence check, NaN guard.
+ * ---------------------------------------------------------------- */
+
+/*  Max velocity magnitude (for the advective CFL limit). */
+inline Real max_speed(const Real* u, const Real* v, const Real* w, int count) {
+    double m = 0.0;
+    #pragma omp parallel for reduction(max:m)
+    for (int tid = 0; tid < count; ++tid) {
+        double s = u[tid]*u[tid] + v[tid]*v[tid] + w[tid]*w[tid];
+        if (s > m) m = s;
+    }
+    return std::sqrt(m);
+}
+
+/*  True if every entry is finite (no NaN/Inf). */
+inline bool field_finite(const Real* a, int count) {
+    int bad = 0;
+    #pragma omp parallel for reduction(+:bad)
+    for (int tid = 0; tid < count; ++tid)
+        if (!std::isfinite(a[tid])) bad += 1;
+    return bad == 0;
+}
+
+/*  dst[i] += Re(src[i]) * norm   (used to assemble the divergence field). */
+inline void accum_real(Real* dst, const Complex* src, double norm, int count) {
+    #pragma omp parallel for
+    for (int tid = 0; tid < count; ++tid)
+        dst[tid] += src[tid][0] * norm;
+}
+
+inline Real max_abs(const Real* a, int count) {
+    double m = 0.0;
+    #pragma omp parallel for reduction(max:m)
+    for (int tid = 0; tid < count; ++tid) {
+        double v = std::fabs(a[tid]);
+        if (v > m) m = v;
+    }
+    return m;
+}
+
 }} // namespace ns3d::cpu
