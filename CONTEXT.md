@@ -27,6 +27,10 @@ The multi-GPU CUDA + MPI implementation in `hpc/`, for clusters.
 An interactive, real-time teaching tool that solves and renders simultaneously. The **2D Explorer** (matplotlib, fast) and the **3D Explorer** (pyvista, live low-resolution) are distinct.
 _Avoid_: "viewer" (that implies replay of precomputed data, which the Explorer is not), "GUI".
 
+**Solver** (Explorer-facing):
+The live, in-process object an Explorer drives: it can step, reset to a Scenario, expose field views, and report Diagnostics. `NS2D` and `NS3D` are the two Solvers. A Solver is the in-process half of an Explorer Backend; the CPU DNS and HPC backend are Backends but not Solvers (they run offline).
+_Avoid_: "sim", "engine", "the simulation object".
+
 ### Flow setup
 
 **Scenario**:
@@ -61,7 +65,10 @@ The rate kinetic energy is converted to heat by viscosity.
 Should stay ≈ 0 for incompressible flow; a live divergence readout is an incompressibility sanity check.
 
 **Term decomposition**:
-Viewing the right-hand-side forces — advection (u·∇)u, diffusion ν∇²u, pressure ∇p — as separate fields, to see each one's effect on the equation.
+Viewing the right-hand-side forces — advection (u·∇)u, diffusion ν∇²u, pressure force −∇p — as separate fields, to see each one's effect on the equation.
+
+**Pressure field** (p):
+The signed scalar recovered from ∇²p = ∇·R, i.e. exactly what the Leray projection removes. High at stagnation points, low in vortex cores (the pressure-minimum vortex criterion in 3D). Distinct from the **pressure force** |−∇p| shown in the term decomposition.
 
 **Passive tracer** (dye):
 A scalar field advected (and weakly diffused) by the flow but exerting no force back on it; used to make advection and mixing visible.

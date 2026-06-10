@@ -2,54 +2,63 @@
 explorer.py - interactive 2D Navier-Stokes playground.
 
     python viz/explorer.py
+    python viz/explorer.py --scenario jet --n 96 --eta 0.005 --dye-diff 1e-3
 
 Watch the equations come alive and build intuition for each term.
 
 Controls:
     scenario   - boundary-condition / flow setup
     field      - what to display:
-                   vorticity / speed / dye  (the flow)
-                   advection / diffusion / pressure  (the RHS forces, |.|)
+                   vorticity / speed / dye / pressure  (the flow; pressure is
+                   the signed p - high at stagnation points, low in vortex cores)
+                   advection / diffusion / pressure force  (the RHS forces, |.|)
     Reynolds   - sets viscosity nu = U0 / Re  (high Re -> turbulence)
     compare Re - second Reynolds number for the side-by-side Compare mode
-    Pause / Reset / Puff dye / Compare
+    Pause / Reset / Puff dye / Compare / Arrows
+
+Arrows overlay the *direction* the colour maps hide: the velocity field on
+the flow fields, and the actual force vectors on the term fields (e.g. watch
+-grad(p) point away from the cylinder nose, opposing the advection arrows).
 
 The diagnostics panel tracks kinetic energy, enstrophy and the dissipation
-rate live; for the Taylor-Green scenario it overlays the exact analytic
-energy decay E = E0 e^{-4 nu t} as a correctness check.  The time step is
-chosen adaptively (CFL) so the sim stays stable across the whole slider range.
+rate live, plus the measured -dE/dt: for unforced flow the energy budget
+dE/dt = -eps means the two curves must lie on top of each other (for driven
+or penalized scenarios the gap is the work done by the forcing/walls).  For
+the Taylor-Green scenario the exact analytic decay E = E0 e^{-4 nu t} is
+overlaid as a correctness check.  The time step is chosen adaptively (CFL)
+so the sim stays stable across the whole slider range.
 """
+
+import argparse
 
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, RadioButtons, Button
 
+import scenarios
 from ns2d import NS2D, BlowUp
+from solver_api import FIELDS, field_data, set_reynolds
 
-SCENARIOS = ["cylinder", "channel", "jet", "step", "shear", "tg", "hit"]
-SCENARIO_HELP = {
-    "cylinder": "flow past a cylinder -> von Karman vortex street",
-    "channel": "plane channel, no-slip walls (wall turbulence)",
-    "jet": "a jet injected through a slot in a solid plate",
-    "step": "backward-facing step -> recirculation bubble",
-    "shear": "double shear layer -> Kelvin-Helmholtz roll-up",
-    "tg": "Taylor-Green vortex -> exact decaying benchmark",
-    "hit": "random field -> homogeneous decaying turbulence",
-}
-FIELDS = ["vorticity", "speed", "dye", "advection", "diffusion", "pressure"]
+SCENARIOS = scenarios.NAMES
 CMAP = {"vorticity": "RdBu_r", "speed": "inferno", "dye": "viridis",
-        "advection": "magma", "diffusion": "magma", "pressure": "magma"}
-
-N = 128
-U0 = 1.5
+        "pressure": "RdBu_r",
+        "advection": "magma", "diffusion": "magma", "pressure force": "magma"}
 
 
 class Explorer:
-    def __init__(self):
-        self.sim = NS2D(N=N, nu=U0 / 500.0, scenario="cylinder", U0=U0)
+    def __init__(self, n=128, scenario="cylinder", eta=scenarios.DEFAULT_ETA,
+                 dye_diffusivity=scenarios.DEFAULT_DYE_DIFFUSIVITY):
+        self.N = n
+        self.U0 = scenarios.DEFAULT_U0
+        # Shared by the main and Compare Solvers so they differ only in nu.
+        self.sim_kwargs = dict(N=n, scenario=scenario, U0=self.U0,
+                               eta=eta, dye_diffusivity=dye_diffusivity)
+        self.sim = NS2D(nu=self.U0 / 500.0, **self.sim_kwargs)
         self.cmp = None                 # second sim for Compare mode
         self.field = "vorticity"
         self.running = True
+        self.show_arrows = False
+        self.quiv = None
         self.substeps = 2
         self.hist = {"t": [], "E": [], "Z": [], "eps": []}
 
@@ -63,7 +72,7 @@ class Explorer:
         ext = [0, 2 * np.pi, 0, 2 * np.pi]
         self.im = self.ax.imshow(self._data(self.sim).T, origin="lower", extent=ext,
                                  cmap=CMAP[self.field], vmin=-8, vmax=8)
-        self.imc = self.axc.imshow(np.zeros((N, N)), origin="lower", extent=ext,
+        self.imc = self.axc.imshow(np.zeros((self.N, self.N)), origin="lower", extent=ext,
                                    cmap=CMAP[self.field], vmin=-8, vmax=8)
         self._overlay(self.ax, self.sim)
         self.title = self.ax.set_title("")
@@ -81,14 +90,7 @@ class Explorer:
         ax.set_xticks([]); ax.set_yticks([])
 
     def _data(self, sim):
-        f = self.field
-        if f == "vorticity":
-            return sim.vorticity()
-        if f == "speed":
-            return sim.speed()
-        if f == "dye":
-            return sim.dye
-        return sim.terms()[f]                      # advection / diffusion / pressure
+        return field_data(sim, self.field)
 
     def _clim(self, sim):
         f = self.field
@@ -98,6 +100,9 @@ class Explorer:
             return 0, 1
         if f == "speed":
             return 0, sim.U0 * 1.5
+        if f == "pressure":                # signed: keep 0 at the colormap centre
+            m = float(np.percentile(np.abs(self._data(sim)), 99) + 1e-6)
+            return -m, m
         return 0, float(np.percentile(self._data(sim), 99) + 1e-6)
 
     def _reset_clim(self):
@@ -119,14 +124,15 @@ class Explorer:
     # ------------------------------------------------------------------
     def _build_widgets(self):
         ax = self.fig.add_axes([0.01, 0.55, 0.13, 0.40]); ax.set_title("scenario", fontsize=9)
-        self.r_scn = RadioButtons(ax, SCENARIOS, active=0); self.r_scn.on_clicked(self._on_scn)
+        self.r_scn = RadioButtons(ax, SCENARIOS, active=SCENARIOS.index(self.sim.scenario))
+        self.r_scn.on_clicked(self._on_scn)
 
         ax = self.fig.add_axes([0.14, 0.55, 0.11, 0.40]); ax.set_title("field", fontsize=9)
         self.r_fld = RadioButtons(ax, FIELDS, active=0); self.r_fld.on_clicked(self._on_fld)
 
         ax = self.fig.add_axes([0.04, 0.49, 0.18, 0.02])
         self.s_re = Slider(ax, "Reynolds", 50, 5000, valinit=500, valstep=50)
-        self.s_re.on_changed(lambda v: setattr(self.sim, "nu", self.sim.U0 / v))
+        self.s_re.on_changed(lambda v: set_reynolds(self.sim, v))
 
         ax = self.fig.add_axes([0.04, 0.45, 0.18, 0.02])
         self.s_rec = Slider(ax, "compare Re", 50, 5000, valinit=2000, valstep=50,
@@ -141,6 +147,8 @@ class Explorer:
         self.b_puff.on_clicked(lambda e: (self.sim.puff(), self.cmp and self.cmp.puff()))
         ax = self.fig.add_axes([0.01, 0.33, 0.20, 0.04]); self.b_cmp = Button(ax, "Compare: off")
         self.b_cmp.on_clicked(self._on_compare)
+        ax = self.fig.add_axes([0.01, 0.28, 0.20, 0.04]); self.b_arr = Button(ax, "Arrows: off")
+        self.b_arr.on_clicked(self._on_arrows)
 
     # ------------------------------------------------------------------
     def _on_scn(self, label):
@@ -154,7 +162,11 @@ class Explorer:
 
     def _on_cmp_re(self, v):
         if self.cmp is not None:
-            self.cmp.nu = self.cmp.U0 / v
+            set_reynolds(self.cmp, v)
+
+    def _on_arrows(self, e):
+        self.show_arrows = not self.show_arrows
+        self.b_arr.label.set_text(f"Arrows: {'on' if self.show_arrows else 'off'}")
 
     def _on_pause(self, e):
         self.running = not self.running
@@ -162,7 +174,8 @@ class Explorer:
 
     def _on_compare(self, e):
         if self.cmp is None:
-            self.cmp = NS2D(N=N, nu=U0 / self.s_rec.val, scenario=self.sim.scenario, U0=U0)
+            kwargs = dict(self.sim_kwargs, scenario=self.sim.scenario)
+            self.cmp = NS2D(nu=self.U0 / self.s_rec.val, **kwargs)
             self.axc.set_visible(True)
             self.b_cmp.label.set_text("Compare: on")
         else:
@@ -204,7 +217,8 @@ class Explorer:
                     self.hist[k] = self.hist[k][-400:]
 
         self.im.set_data(self._data(self.sim).T)
-        self.title.set_text(f"{SCENARIO_HELP[self.sim.scenario]}\n"
+        self._draw_arrows()
+        self.title.set_text(f"{scenarios.HELP[self.sim.scenario]}\n"
                             f"Re={self.sim.reynolds():.0f}  t={self.sim.time:.2f}  "
                             f"div(u)={self.sim.max_divergence():.1e}")
         if self.cmp is not None:
@@ -213,6 +227,31 @@ class Explorer:
         self._draw_diag()
         self.fig.canvas.draw_idle()
 
+    def _draw_arrows(self):
+        """Direction overlay: the colour maps show only magnitudes (or a
+        scalar), so arrows restore the vector picture.  Flow fields get the
+        velocity u; each term field gets its own force vectors; the signed
+        pressure field gets -grad(p), so you see the force point from high
+        to low pressure."""
+        if self.quiv is not None:
+            self.quiv.remove()
+            self.quiv = None
+        if not self.show_arrows:
+            return
+        sim = self.sim
+        if self.field in ("advection", "diffusion", "pressure force"):
+            fx, fy = sim.term_vectors()[self.field]
+        elif self.field == "pressure":
+            fx, fy = sim.term_vectors()["pressure force"]
+        else:
+            fx, fy = sim.velocity()
+        s = max(1, sim.N // 16)
+        x = np.arange(sim.N) * sim.dx
+        X, Y = np.meshgrid(x, x, indexing="ij")
+        self.quiv = self.ax.quiver(X[::s, ::s], Y[::s, ::s],
+                                   fx[::s, ::s], fy[::s, ::s],
+                                   color="k", alpha=0.7, width=0.003)
+
     def _draw_diag(self):
         ax = self.axd
         ax.clear()
@@ -220,6 +259,12 @@ class Explorer:
         if len(t) > 1:
             ax.plot(t, self.hist["E"], "C0", label="kinetic energy E")
             ax.plot(t, self.hist["eps"], "C3", label="dissipation 2nu*Z")
+            if len(t) > 4:
+                # Energy budget: for unforced flow dE/dt = -eps, so this
+                # curve must sit on the dissipation one; any gap is the work
+                # done by the body force / penalized walls.
+                dEdt = np.gradient(np.array(self.hist["E"]), np.array(t))
+                ax.plot(t, -dEdt, "C3--", lw=1, label="-dE/dt (=eps unforced)")
             if self.sim.scenario == "tg":
                 E0 = self.hist["E"][0]
                 exact = E0 * np.exp(-4 * self.sim.nu * (np.array(t) - t[0]))
@@ -230,5 +275,14 @@ class Explorer:
 
 
 if __name__ == "__main__":
-    Explorer()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--n", type=int, default=128, help="grid resolution")
+    ap.add_argument("--scenario", default="cylinder", choices=SCENARIOS)
+    ap.add_argument("--eta", type=float, default=scenarios.DEFAULT_ETA,
+                    help="Brinkman penalization time-scale")
+    ap.add_argument("--dye-diff", type=float, default=scenarios.DEFAULT_DYE_DIFFUSIVITY,
+                    help="passive-tracer (dye) diffusivity")
+    args = ap.parse_args()
+    Explorer(n=args.n, scenario=args.scenario, eta=args.eta,
+             dye_diffusivity=args.dye_diff)
     plt.show()

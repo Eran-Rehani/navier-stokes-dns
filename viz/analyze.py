@@ -14,6 +14,7 @@ import sys
 import numpy as np
 import matplotlib.pyplot as plt
 
+from diagnostics import kinetic_energy
 from fields import load, speed, energy_spectrum
 
 
@@ -27,9 +28,8 @@ def main():
     ke = []
     for f in files:
         N, u, v, w = load(f)
-        s = speed(u, v, w)
-        ke.append(0.5 * np.mean(s ** 2) if v is None else
-                  0.5 * np.mean(u ** 2 + v ** 2 + w ** 2))
+        ke.append(kinetic_energy(speed(u, v, w)) if v is None else
+                  kinetic_energy(u, v, w))
 
     N, u, v, w = load(files[-1])
     fig, (axL, axR) = plt.subplots(1, 2, figsize=(12, 5))

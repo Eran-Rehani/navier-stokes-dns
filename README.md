@@ -23,10 +23,18 @@ Both explorers let you *see* each piece of the Navier–Stokes equation:
 
 - **Term decomposition** — display the magnitude of each force separately:
   advection `(u·∇)u` (steepening), diffusion `ν∇²u` (smoothing), and the
-  pressure force (enforcing incompressibility). Watch which term dominates where.
+  pressure force `−∇p` (enforcing incompressibility). Watch which term dominates where.
+- **Signed pressure field** — the `p` that the Leray projection implicitly
+  solves for: high where streams collide (stagnation points), low inside
+  vortex cores. Validated against the exact Taylor–Green pressure.
+- **Force arrows** (2D) — toggle a vector overlay: velocity arrows on the flow
+  fields, the actual force vectors on the term fields. On the pressure field
+  the arrows are `−∇p`, so you *see* the force point from high to low pressure
+  and oppose advection at the cylinder nose.
 - **Passive dye** — inject a tracer and watch advection stretch and fold it.
-- **Live diagnostics** — kinetic energy, enstrophy, dissipation `ε = 2νΩ`, and
-  `max|∇·u|` (which stays ≈0, confirming incompressibility) update in real time.
+- **Live diagnostics** — kinetic energy, enstrophy, dissipation `ε = 2νΩ`, the
+  measured `−dE/dt` (which must equal `ε` for unforced flow — the energy budget,
+  live), and `max|∇·u|` (which stays ≈0, confirming incompressibility).
 - **Reynolds comparison** — run the same scenario at two Reynolds numbers side
   by side to see the laminar→turbulent transition.
 
@@ -65,8 +73,9 @@ python viz/explorer.py
 A window opens. Pick a scenario, drag the **Reynolds** slider, and watch the
 field evolve in real time. Try `cylinder` at Re ≈ 200 to see a von Kármán
 vortex street form behind the obstacle. Switch the **field** selector between
-`vorticity`, `speed`, `dye`, and the three force terms (`advection`,
-`diffusion`, `pressure`); hit **Compare** to run two Reynolds numbers at once.
+`vorticity`, `speed`, `dye`, the signed `pressure`, and the three force terms
+(`advection`, `diffusion`, `pressure force`); toggle **Arrows** for the vector
+overlay and hit **Compare** to run two Reynolds numbers at once.
 
 ### 2. Live 3D explorer
 
@@ -75,9 +84,10 @@ python viz/explorer3d.py                  # single view, real-time at N≈32
 python viz/explorer3d.py --compare        # two Reynolds numbers side by side
 ```
 
-Keys: `1`–`6` pick the field, `n` next scenario, `r` reset, `space` pause,
+Keys: `1`–`7` pick the field, `n` next scenario, `r` reset, `space` pause,
 `p` inject a dye puff, `q` quit. Sliders control Reynolds and the isosurface
-level. (Requires a display; uses pyvista.)
+level. A low isosurface level on the `pressure` field traces vortex cores
+(the pressure-minimum criterion). (Requires a display; uses pyvista.)
 
 ### 3. The 3D CPU DNS
 

@@ -19,6 +19,9 @@ Read this alongside cpu_kernels.hpp - every routine has a direct counterpart.
 
 import numpy as np
 
+import diagnostics
+import scenarios
+
 TWO_PI = 2.0 * np.pi
 
 # Williamson (1980) low-storage RK3 coefficients - identical to the C++ code.
@@ -33,8 +36,10 @@ class BlowUp(Exception):
 class NS2D:
     """A periodic 2D incompressible Navier-Stokes solver in spectral space."""
 
-    def __init__(self, N=128, nu=2.0e-3, scenario="cylinder", U0=1.5,
-                 cfl=0.4, dye_diffusivity=2.0e-3):
+    def __init__(self, N=128, nu=2.0e-3, scenario="cylinder",
+                 U0=scenarios.DEFAULT_U0, cfl=scenarios.DEFAULT_CFL,
+                 dye_diffusivity=scenarios.DEFAULT_DYE_DIFFUSIVITY,
+                 eta=scenarios.DEFAULT_ETA):
         self.N = N
         self.nu = nu
         self.scenario = scenario
@@ -59,7 +64,7 @@ class NS2D:
         self.mask = np.zeros((N, N))                   # penalization fields
         self.tu = np.zeros((N, N))
         self.tv = np.zeros((N, N))
-        self.eta = 0.01
+        self.eta = eta
         self.force = 0.0
 
         self.dye = np.zeros((N, N))                    # passive tracer
@@ -74,76 +79,17 @@ class NS2D:
         N, dx = self.N, self.dx
         x = np.arange(N) * dx
         X, Y = np.meshgrid(x, x, indexing="ij")
-        u = np.zeros((N, N))
-        v = np.zeros((N, N))
-        self.mask[:] = 0.0
-        self.tu[:] = 0.0
-        self.tv[:] = 0.0
         self.dye[:] = 0.0
-        self.dye_source[:] = 0.0
-        self.force = 0.0
         self.time = 0.0
         self.step_count = 0
-        s = self.scenario
 
-        if s == "tg":
-            u = np.sin(X) * np.cos(Y)
-            v = -np.cos(X) * np.sin(Y)
-        elif s == "shear":
-            rho, delta = 30.0, 0.05
-            u = np.where(Y <= np.pi,
-                         np.tanh(rho * (Y - np.pi / 2)),
-                         np.tanh(rho * (3 * np.pi / 2 - Y)))
-            v = delta * np.sin(X)
-        elif s == "hit":
-            rng = np.random.default_rng(0)
-            u = rng.standard_normal((N, N))
-            v = rng.standard_normal((N, N))
-        elif s == "cylinder":
-            xc, yc, R = np.pi, np.pi, 0.5
-            solid = (X - xc) ** 2 + (Y - yc) ** 2 <= R ** 2
-            self.mask[solid] = 1.0
-            u[:] = self.U0
-            u[solid] = 0.0
-        elif s == "channel":
-            wall = 0.12 * TWO_PI
-            solid = (Y < wall) | (Y > TWO_PI - wall)
-            self.mask[solid] = 1.0
-            yy = np.clip((Y - wall) / (TWO_PI - 2 * wall), 0, 1)
-            u = self.U0 * 4.0 * yy * (1 - yy)
-            v = 0.02 * self.U0 * np.sin(X)
-            u[solid] = 0.0
-            v[solid] = 0.0
-            self.force = 0.01
-        elif s == "jet":
-            plate = 0.10 * TWO_PI
-            slot = np.abs(Y - np.pi) < 0.35
-            inplate = X < plate
-            self.mask[inplate] = 1.0
-            self.tu[inplate & slot] = self.U0
-        elif s == "step":
-            inlet = 0.08 * TWO_PI
-            stepx = TWO_PI / 3.0
-            block = (X < stepx) & (Y < np.pi)
-            inflow = (X < inlet) & (Y >= np.pi)
-            self.mask[block] = 1.0
-            self.mask[inflow] = 1.0
-            self.tu[inflow] = self.U0
-            u[(Y >= np.pi) & ~block & ~inflow] = self.U0
-        else:
-            raise ValueError(f"unknown scenario {s!r}")
-
-        # Dye source: a band just downstream of the inlet (so advection is
-        # immediately visible), or a central blob for the periodic scenarios.
-        if s == "jet":
-            band = (X > 0.7) & (X < 1.1) & (np.abs(Y - np.pi) < 0.4)
-        elif s == "step":
-            band = (X > 0.6) & (X < 1.0) & (Y >= np.pi)
-        elif s in ("cylinder", "channel"):
-            band = (X > 0.2) & (X < 0.6)
-        else:
-            band = (X - np.pi) ** 2 + (Y - np.pi) ** 2 < 0.3 ** 2
-        self.dye_source[band & (self.mask < 0.5)] = 1.0
+        setup = scenarios.build(self.scenario, (X, Y), self.U0)
+        u, v = setup.velocity
+        self.mask[:] = setup.mask
+        self.tu[:] = setup.target[0]
+        self.tv[:] = setup.target[1]
+        self.force = setup.force
+        self.dye_source[:] = setup.dye_source
 
         self.uh = np.fft.fft2(u)
         self.vh = np.fft.fft2(v)
@@ -253,43 +199,67 @@ class NS2D:
 
     def vorticity(self):
         """omega = dv/dx - du/dy."""
-        return np.real(np.fft.ifft2(1j * self.kx * self.vh - 1j * self.ky * self.uh))
+        return diagnostics.curl_2d(self.uh, self.vh, self.kx, self.ky)
 
-    def terms(self):
-        """Magnitude of each force in du/dt: advection, diffusion, pressure.
+    def vorticity_view(self):
+        """Displayable vorticity field (signed scalar omega in 2D)."""
+        return self.vorticity()
 
-        Pressure is recovered as exactly the part the Leray projection removes,
-        so |pressure| shows where the flow has to push against itself to stay
-        incompressible (e.g. stagnation points, obstacle faces).
+    def _divR_hat(self):
+        """Spectral (k . R_hat) of the unprojected RHS R = advection +
+        diffusion + penalization.  The Leray projection removes exactly the
+        gradient part of R, and that gradient is the pressure gradient:
+        solving the pressure Poisson equation lap(p) = div(R) gives
+            p_hat = -i (k . R_hat) / k^2.
         """
         _, _, au, av, du, dv, pu, pv = self._rhs_components()
         Ru, Rv = np.fft.fft2(au + du + pu), np.fft.fft2(av + dv + pv)
-        divR = self.kx * Ru + self.ky * Rv
-        pfx = np.real(np.fft.ifft2(self.kx * divR * self.ksq_inv))   # pressure force
-        pfy = np.real(np.fft.ifft2(self.ky * divR * self.ksq_inv))
+        return (au, av, du, dv), self.kx * Ru + self.ky * Rv
+
+    def pressure_field(self):
+        """The pressure p itself (zero-mean), from lap(p) = div(R).
+
+        High p where streams collide (stagnation points, obstacle noses),
+        low p inside vortex cores - the field the flow 'pushes against'
+        to stay incompressible.
+        """
+        _, divR = self._divR_hat()
+        return np.real(np.fft.ifft2(-1j * divR * self.ksq_inv))
+
+    def term_vectors(self):
+        """Each force in du/dt as a vector field (fx, fy):
+        advection -(u.grad)u, diffusion nu lap(u), pressure force -grad(p).
+        Up to penalization/body force, the three sum to du/dt.
+        """
+        (au, av, du, dv), divR = self._divR_hat()
+        # grad(p) in spectral form: i k p_hat = k (k . R_hat) / k^2.
+        gpx = np.real(np.fft.ifft2(self.kx * divR * self.ksq_inv))
+        gpy = np.real(np.fft.ifft2(self.ky * divR * self.ksq_inv))
         return {
-            "advection": np.hypot(au, av),
-            "diffusion": np.hypot(du, dv),
-            "pressure": np.hypot(pfx, pfy),
+            "advection": (au, av),
+            "diffusion": (du, dv),
+            "pressure force": (-gpx, -gpy),
         }
+
+    def terms(self):
+        """Magnitude of each force in du/dt (see term_vectors)."""
+        return {name: np.hypot(fx, fy)
+                for name, (fx, fy) in self.term_vectors().items()}
 
     # ------------------------------------------------------------------
     #  Scalar diagnostics (tie the picture to the equations).
     # ------------------------------------------------------------------
     def kinetic_energy(self):
-        u, v = self.velocity()
-        return 0.5 * np.mean(u ** 2 + v ** 2)
+        return diagnostics.kinetic_energy(*self.velocity())
 
     def enstrophy(self):
-        w = self.vorticity()
-        return 0.5 * np.mean(w ** 2)
+        return diagnostics.enstrophy(self.vorticity())
 
     def dissipation(self):
-        return 2.0 * self.nu * self.enstrophy()
+        return diagnostics.dissipation(self.nu, self.enstrophy())
 
     def max_divergence(self):
-        d = np.real(np.fft.ifft2(1j * (self.kx * self.uh + self.ky * self.vh)))
-        return float(np.max(np.abs(d)))
+        return diagnostics.max_divergence((self.uh, self.vh), (self.kx, self.ky))
 
     def reynolds(self):
         return self.U0 / self.nu

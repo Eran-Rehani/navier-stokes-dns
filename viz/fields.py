@@ -1,15 +1,18 @@
 """
-fields.py - load and analyse 3D DNS snapshots written by ns3d_cpu.
+fields.py - load 3D DNS snapshots written by ns3d_cpu.
 
 Binary snapshot format (little-endian):
     int32   N
     float64 u[N^3], v[N^3], w[N^3]    (index order [iz][iy][ix])
 
-Provides the post-processing diagnostics used by the plotting scripts:
-velocity magnitude, vorticity, and the kinetic-energy spectrum E(k).
+The Diagnostics themselves (vorticity, energy spectrum, ...) live in
+diagnostics.py; this module owns the snapshot format and re-exports the
+post-processing helpers the plotting scripts use.
 """
 
 import numpy as np
+
+from diagnostics import curl_3d, energy_spectrum  # noqa: F401  (re-export)
 
 TWO_PI = 2.0 * np.pi
 
@@ -32,37 +35,11 @@ def speed(u, v, w):
     return np.sqrt(u * u + v * v + w * w)
 
 
-def _wavenumbers(N):
-    k = np.fft.fftfreq(N, d=1.0 / N)
-    return np.meshgrid(k, k, k, indexing="ij")
-
-
 def vorticity_magnitude(u, v, w):
     """|curl u| computed spectrally (exact for the periodic field)."""
     N = u.shape[0]
-    kz, ky, kx = _wavenumbers(N)                 # arrays are [iz, iy, ix]
+    k = np.fft.fftfreq(N, d=1.0 / N)
+    kz, ky, kx = np.meshgrid(k, k, k, indexing="ij")   # arrays are [iz, iy, ix]
     uh, vh, wh = np.fft.fftn(u), np.fft.fftn(v), np.fft.fftn(w)
-    wx = np.real(np.fft.ifftn(1j * (ky * wh - kz * vh)))
-    wy = np.real(np.fft.ifftn(1j * (kz * uh - kx * wh)))
-    wz = np.real(np.fft.ifftn(1j * (kx * vh - ky * uh)))
+    wx, wy, wz = curl_3d(uh, vh, wh, kx, ky, kz)
     return np.sqrt(wx * wx + wy * wy + wz * wz)
-
-
-def energy_spectrum(u, v, w):
-    """Shell-averaged kinetic-energy spectrum E(k).
-
-    The hallmark of 3D turbulence is the Kolmogorov k^-5/3 inertial range;
-    plotting E(k) against k on log axes lets you see it directly.
-    """
-    N = u.shape[0]
-    kz, ky, kx = _wavenumbers(N)
-    kmag = np.sqrt(kx ** 2 + ky ** 2 + kz ** 2)
-    uh = np.fft.fftn(u) / N ** 3
-    vh = np.fft.fftn(v) / N ** 3
-    wh = np.fft.fftn(w) / N ** 3
-    e = 0.5 * (np.abs(uh) ** 2 + np.abs(vh) ** 2 + np.abs(wh) ** 2)
-
-    kbin = kmag.astype(int).ravel()
-    E = np.bincount(kbin, weights=e.ravel(), minlength=N // 2 + 1)
-    k = np.arange(E.size)
-    return k[1:N // 2], E[1:N // 2]              # drop k=0 mean, Nyquist tail

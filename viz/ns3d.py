@@ -12,6 +12,9 @@ Fields are indexed [ix, iy, iz]; x is the streamwise direction.
 
 import numpy as np
 
+import diagnostics
+import scenarios
+
 TWO_PI = 2.0 * np.pi
 RK_A = np.array([0.0, -5.0 / 9.0, -153.0 / 128.0])
 RK_B = np.array([1.0 / 3.0, 15.0 / 16.0, 8.0 / 15.0])
@@ -22,8 +25,10 @@ class BlowUp(Exception):
 
 
 class NS3D:
-    def __init__(self, N=32, nu=4.0e-3, scenario="cylinder", U0=1.5,
-                 cfl=0.4, dye_diffusivity=3.0e-3):
+    def __init__(self, N=32, nu=4.0e-3, scenario="cylinder",
+                 U0=scenarios.DEFAULT_U0, cfl=scenarios.DEFAULT_CFL,
+                 dye_diffusivity=scenarios.DEFAULT_DYE_DIFFUSIVITY,
+                 eta=scenarios.DEFAULT_ETA):
         self.N = N
         self.nu = nu
         self.scenario = scenario
@@ -48,7 +53,7 @@ class NS3D:
         sh = (N, N, N)
         self.mask = np.zeros(sh)
         self.target = [np.zeros(sh) for _ in range(3)]
-        self.eta = 0.01
+        self.eta = eta
         self.force = 0.0
         self.dye = np.zeros(sh)
         self.dye_source = np.zeros(sh)
@@ -60,71 +65,18 @@ class NS3D:
         N, dx = self.N, self.dx
         x = np.arange(N) * dx
         X, Y, Z = np.meshgrid(x, x, x, indexing="ij")
-        u = np.zeros((N, N, N)); v = np.zeros((N, N, N)); w = np.zeros((N, N, N))
-        self.mask[:] = 0.0
-        for t in self.target:
-            t[:] = 0.0
         self.dye[:] = 0.0
-        self.dye_source[:] = 0.0
-        self.force = 0.0
         self.time = 0.0
         self.step_count = 0
-        s = self.scenario
 
-        if s == "tg":
-            u = np.sin(X) * np.cos(Y) * np.cos(Z)
-            v = -np.cos(X) * np.sin(Y) * np.cos(Z)
-        elif s == "shear":
-            rho, delta = 30.0, 0.05
-            u = np.where(Y <= np.pi, np.tanh(rho * (Y - np.pi / 2)),
-                         np.tanh(rho * (3 * np.pi / 2 - Y)))
-            v = delta * np.sin(X) * np.sin(Z)
-        elif s == "hit":
-            rng = np.random.default_rng(0)
-            u, v, w = (rng.standard_normal((N, N, N)) for _ in range(3))
-        elif s == "cylinder":
-            solid = (X - np.pi) ** 2 + (Y - np.pi) ** 2 <= 0.5 ** 2
-            self.mask[solid] = 1.0
-            u[:] = self.U0
-            u[solid] = 0.0
-        elif s == "channel":
-            wall = 0.12 * TWO_PI
-            solid = (Y < wall) | (Y > TWO_PI - wall)
-            self.mask[solid] = 1.0
-            yy = np.clip((Y - wall) / (TWO_PI - 2 * wall), 0, 1)
-            u = self.U0 * 4.0 * yy * (1 - yy)
-            v = 0.02 * self.U0 * np.sin(X) * np.sin(Z)
-            u[solid] = 0.0; v[solid] = 0.0
-            self.force = 0.01
-        elif s == "jet":
-            plate = 0.10 * TWO_PI
-            slot = np.abs(Y - np.pi) < 0.35
-            inplate = X < plate
-            self.mask[inplate] = 1.0
-            self.target[0][inplate & slot] = self.U0
-        elif s == "step":
-            inlet = 0.08 * TWO_PI
-            stepx = TWO_PI / 3.0
-            block = (X < stepx) & (Y < np.pi)
-            inflow = (X < inlet) & (Y >= np.pi)
-            self.mask[block] = 1.0
-            self.mask[inflow] = 1.0
-            self.target[0][inflow] = self.U0
-            u[(Y >= np.pi) & ~block & ~inflow] = self.U0
-        else:
-            raise ValueError(f"unknown scenario {s!r}")
+        setup = scenarios.build(self.scenario, (X, Y, Z), self.U0)
+        self.mask[:] = setup.mask
+        for i in range(3):
+            self.target[i][:] = setup.target[i]
+        self.force = setup.force
+        self.dye_source[:] = setup.dye_source
 
-        if s == "jet":
-            band = (X > 0.7) & (X < 1.1) & (np.abs(Y - np.pi) < 0.4)
-        elif s == "step":
-            band = (X > 0.6) & (X < 1.0) & (Y >= np.pi)
-        elif s in ("cylinder", "channel"):
-            band = (X > 0.2) & (X < 0.6)
-        else:
-            band = (X - np.pi) ** 2 + (Y - np.pi) ** 2 + (Z - np.pi) ** 2 < 0.4 ** 2
-        self.dye_source[band & (self.mask < 0.5)] = 1.0
-
-        self.uh = [np.fft.fftn(f) for f in (u, v, w)]
+        self.uh = [np.fft.fftn(f) for f in setup.velocity]
         self._project()
         self.Q = [np.zeros((N, N, N), dtype=complex) for _ in range(3)]
         self.Qc = np.zeros((N, N, N), dtype=complex)
@@ -203,41 +155,51 @@ class NS3D:
 
     def vorticity(self):
         """Vector vorticity components (wx, wy, wz)."""
-        wx = np.real(np.fft.ifftn(1j * (self.ky * self.uh[2] - self.kz * self.uh[1])))
-        wy = np.real(np.fft.ifftn(1j * (self.kz * self.uh[0] - self.kx * self.uh[2])))
-        wz = np.real(np.fft.ifftn(1j * (self.kx * self.uh[1] - self.ky * self.uh[0])))
-        return wx, wy, wz
+        return diagnostics.curl_3d(*self.uh, self.kx, self.ky, self.kz)
 
     def vorticity_magnitude(self):
         wx, wy, wz = self.vorticity()
         return np.sqrt(wx ** 2 + wy ** 2 + wz ** 2)
 
-    def terms(self):
+    def vorticity_view(self):
+        """Displayable vorticity field (|curl u| in 3D)."""
+        return self.vorticity_magnitude()
+
+    def _divR_hat(self):
+        """Spectral (k . R_hat) of the unprojected RHS; see ns2d._divR_hat."""
         _, adv, diff, pen = self._rhs_components()
         R = [np.fft.fftn(adv[i] + diff[i] + pen[i]) for i in range(3)]
-        divR = sum(self.K[i] * R[i] for i in range(3))
-        pf = [np.real(np.fft.ifftn(self.K[i] * divR * self.ksq_inv)) for i in range(3)]
+        return adv, diff, sum(self.K[i] * R[i] for i in range(3))
+
+    def pressure_field(self):
+        """The pressure p itself (zero-mean), from lap(p) = div(R).
+        Its low-p isosurfaces trace vortex cores - the classic pressure-minimum
+        vortex criterion."""
+        _, _, divR = self._divR_hat()
+        return np.real(np.fft.ifftn(-1j * divR * self.ksq_inv))
+
+    def terms(self):
+        adv, diff, divR = self._divR_hat()
+        gp = [np.real(np.fft.ifftn(self.K[i] * divR * self.ksq_inv)) for i in range(3)]
         mag = lambda f: np.sqrt(sum(c ** 2 for c in f))
         return {
             "advection": mag(adv),
             "diffusion": mag(diff),
-            "pressure": mag(pf),
+            "pressure force": mag(gp),
         }
 
     # ------------------------------------------------------------------
     def kinetic_energy(self):
-        u = self.velocity()
-        return 0.5 * np.mean(u[0] ** 2 + u[1] ** 2 + u[2] ** 2)
+        return diagnostics.kinetic_energy(*self.velocity())
 
     def enstrophy(self):
-        return 0.5 * np.mean(self.vorticity_magnitude() ** 2)
+        return diagnostics.enstrophy(*self.vorticity())
 
     def dissipation(self):
-        return 2.0 * self.nu * self.enstrophy()
+        return diagnostics.dissipation(self.nu, self.enstrophy())
 
     def max_divergence(self):
-        d = np.real(np.fft.ifftn(1j * sum(self.K[i] * self.uh[i] for i in range(3))))
-        return float(np.max(np.abs(d)))
+        return diagnostics.max_divergence(self.uh, self.K)
 
     def reynolds(self):
         return self.U0 / self.nu

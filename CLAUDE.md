@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A pedagogical DNS of the incompressible Navier–Stokes equations on a periodic
 `[0, 2π]` box. Three layers, all sharing one numerical method:
 
-- **2D explorer** (`viz/ns2d.py` + `viz/explorer.py`): pure-Python interactive solver, matplotlib sliders. Fields: vorticity/speed/dye + term decomposition (advection/diffusion/pressure). Live diagnostics, Compare mode, TG validation overlay.
+- **2D explorer** (`viz/ns2d.py` + `viz/explorer.py`): pure-Python interactive solver, matplotlib sliders. Fields: vorticity/speed/dye/pressure (signed p) + term decomposition (advection/diffusion/pressure force). Arrows overlay (velocity or force vectors), live diagnostics incl. -dE/dt energy budget, Compare mode, TG validation overlay.
 - **3D explorer** (`viz/ns3d.py` + `viz/explorer3d.py`): live low-res (N≈32) pyvista isosurfaces; same features. No-Qt backend → manual VTK render loop; Compare is a `--compare` startup flag (can't relayout live).
 - **3D CPU DNS** (root: `solver_cpu.cpp` + `cpu_kernels.hpp`): real pseudo-spectral solver, FFTW3 + OpenMP, single workstation. The default build. **No CUDA/MPI dependencies.**
 - **HPC backend** (`hpc/`): same algorithm scaled to multi-GPU via CUDA + cuFFT + CUDA-aware MPI, 2D pencil decomposition. Built separately; needs GPU hardware not present on the dev machine.

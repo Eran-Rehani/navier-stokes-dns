@@ -10,7 +10,9 @@ is shown as a 3D isosurface that updates every frame.  Same numerics and
 pedagogy as the 2D explorer, in 3D.
 
 Keyboard:
-    1..6   choose field: vorticity / speed / dye / advection / diffusion / pressure
+    1..7   choose field: vorticity / speed / dye / pressure (signed p; a low
+           isosurface level traces vortex cores, the pressure-minimum
+           criterion) / advection / diffusion / pressure force
     n      next scenario        r   reset        space  pause/resume
     p      inject a dye puff     q   quit
 Sliders: Reynolds (and 'compare Re' in --compare mode), isosurface level.
@@ -23,37 +25,33 @@ import argparse
 import numpy as np
 import pyvista as pv
 
+import scenarios
 from ns3d import NS3D, BlowUp
+from solver_api import FIELDS, field_data, set_reynolds
 
-SCENARIOS = ["cylinder", "channel", "jet", "step", "shear", "tg", "hit"]
-FIELDS = ["vorticity", "speed", "dye", "advection", "diffusion", "pressure"]
+SCENARIOS = scenarios.NAMES
 CMAP = {"vorticity": "hot", "speed": "viridis", "dye": "cool",
-        "advection": "magma", "diffusion": "magma", "pressure": "magma"}
-
-
-def field_data(sim, field):
-    if field == "vorticity":
-        return sim.vorticity_magnitude()
-    if field == "speed":
-        return sim.speed()
-    if field == "dye":
-        return sim.dye
-    return sim.terms()[field]
+        "pressure": "RdBu_r",
+        "advection": "magma", "diffusion": "magma", "pressure force": "magma"}
 
 
 class Explorer3D:
-    def __init__(self, n=32, scenario="cylinder", compare=False):
-        self.U0 = 1.5
+    def __init__(self, n=32, scenario="cylinder", compare=False,
+                 eta=scenarios.DEFAULT_ETA,
+                 dye_diffusivity=scenarios.DEFAULT_DYE_DIFFUSIVITY):
+        self.U0 = scenarios.DEFAULT_U0
         self.field = "vorticity"
         self.running = True
         self.level_frac = 0.4          # isosurface level as a fraction of max
         self.quit = False
         self.scn_idx = SCENARIOS.index(scenario)
 
-        self.sims = [NS3D(N=n, nu=self.U0 / 500.0, scenario=scenario, U0=self.U0)]
+        kwargs = dict(N=n, scenario=scenario, U0=self.U0,
+                      eta=eta, dye_diffusivity=dye_diffusivity)
+        self.sims = [NS3D(nu=self.U0 / 500.0, **kwargs)]
         shape = (1, 1)
         if compare:
-            self.sims.append(NS3D(N=n, nu=self.U0 / 2000.0, scenario=scenario, U0=self.U0))
+            self.sims.append(NS3D(nu=self.U0 / 2000.0, **kwargs))
             shape = (1, 2)
         self.compare = compare
 
@@ -84,16 +82,20 @@ class Explorer3D:
         data = field_data(sim, self.field)
         g = self.grids[j]
         g["s"] = data.flatten(order="F")
-        lo = float(data.min()) if self.field in ("vorticity", "speed", "dye",
-                                                  "advection", "diffusion", "pressure") else 0.0
-        level = lo + self.level_frac * (float(data.max()) - lo) + 1e-9
+        lo, hi = float(data.min()), float(data.max())
+        if self.field == "pressure":       # signed: keep 0 at the colormap centre
+            m = max(abs(lo), abs(hi))
+            clim = (-m, m + 1e-9)
+        else:
+            clim = (lo, hi + 1e-9)
+        level = lo + self.level_frac * (hi - lo) + 1e-9
         try:
             iso = g.contour([level])
         except Exception:
             iso = None
         if iso is not None and iso.n_points:
             self.plotter.add_mesh(iso, scalars="s", cmap=CMAP[self.field],
-                                  clim=(lo, float(data.max()) + 1e-9),
+                                  clim=clim,
                                   name="iso", show_scalar_bar=False)
         else:
             self.plotter.remove_actor("iso", render=False)
@@ -127,11 +129,11 @@ class Explorer3D:
 
     # ---- widget / key callbacks --------------------------------------
     def _set_re(self, v):
-        self.sims[0].nu = self.U0 / v
+        set_reynolds(self.sims[0], v)
 
     def _set_re_cmp(self, v):
         if self.compare:
-            self.sims[1].nu = self.U0 / v
+            set_reynolds(self.sims[1], v)
 
     def _set_level(self, v):
         self.level_frac = float(v)
@@ -200,5 +202,10 @@ if __name__ == "__main__":
     ap.add_argument("--n", type=int, default=32, help="grid resolution (real-time ~32)")
     ap.add_argument("--scenario", default="cylinder", choices=SCENARIOS)
     ap.add_argument("--compare", action="store_true", help="two Reynolds numbers side by side")
+    ap.add_argument("--eta", type=float, default=scenarios.DEFAULT_ETA,
+                    help="Brinkman penalization time-scale")
+    ap.add_argument("--dye-diff", type=float, default=scenarios.DEFAULT_DYE_DIFFUSIVITY,
+                    help="passive-tracer (dye) diffusivity")
     args = ap.parse_args()
-    Explorer3D(n=args.n, scenario=args.scenario, compare=args.compare).run()
+    Explorer3D(n=args.n, scenario=args.scenario, compare=args.compare,
+               eta=args.eta, dye_diffusivity=args.dye_diff).run()
